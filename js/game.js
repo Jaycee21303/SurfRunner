@@ -45,7 +45,6 @@
   // ---------------------------------------------------------------------------
   let width = window.innerWidth;
   let height = window.innerHeight;
-
   canvas.width = width;
   canvas.height = height;
 
