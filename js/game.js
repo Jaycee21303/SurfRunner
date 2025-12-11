@@ -1,5 +1,5 @@
-// Tidal Drop - Infinite Surf
-// Static, GitHub Pages–friendly game (no backend, localStorage only).
+// Tidal Drop - Sideways Surf Edition
+// Surfer stays near center while the blue wave and obstacles move left.
 
 (() => {
   const canvas = document.getElementById("gameCanvas");
@@ -25,52 +25,83 @@
 
   let width = window.innerWidth;
   let height = window.innerHeight;
-
   canvas.width = width;
   canvas.height = height;
+
+  // Wave parameters (side-scrolling)
+  const wave = {
+    amplitude: height * 0.18,
+    wavelength: 220,
+    baseHeight: height * 0.6,
+    speed: 260,   // base horizontal speed (px/s)
+    offset: 0     // phase offset to move the pattern left
+  };
 
   function resizeCanvas() {
     width = window.innerWidth;
     height = window.innerHeight;
     canvas.width = width;
     canvas.height = height;
+
+    wave.amplitude = height * 0.18;
+    wave.baseHeight = height * 0.6;
+
+    if (surfer.onWave) {
+      surfer.y = waveY(surfer.x) - surfer.height;
+    }
   }
 
   window.addEventListener("resize", resizeCanvas);
 
+  // Wave height function
+  function waveY(x) {
+    const angle = ((x + wave.offset) / wave.wavelength) * Math.PI * 2;
+    return wave.baseHeight + Math.sin(angle) * wave.amplitude;
+  }
+
   // Game state
   let gameState = "menu"; // "menu" | "playing" | "gameover"
 
-  let surfer = {
-    x: width / 2,
-    y: height * 0.2,
-    radius: 18,
-    vx: 0
+  const surfer = {
+    x: width * 0.3,        // fixed-ish position horizontally
+    y: 0,
+    width: 42,
+    height: 46,
+    vy: 0,
+    onWave: true
   };
 
-  const SURFER_SPEED = 320; // px / s
+  const physics = {
+    gravity: 900,
+    jumpVelocity: -550,
+    maxFallSpeed: 1200
+  };
+
+  let jumpRequested = false;
 
   let obstacles = [];
   let spawnTimer = 0;
-  let spawnInterval = 0.85; // seconds
+  let spawnInterval = 1.2; // seconds, will scale down as we go
+
   let distance = 0;
   let bestScore = loadBestScore();
   let difficultyTimer = 0;
 
   let lastTimestamp = performance.now();
 
-  let pointerDirection = 0; // -1 left, 1 right, 0 idle
-
   function resetGameValues() {
-    surfer.x = width / 2;
-    surfer.y = height * 0.2;
-    surfer.vx = 0;
+    surfer.x = width * 0.3;
+    surfer.y = waveY(surfer.x) - surfer.height;
+    surfer.vy = 0;
+    surfer.onWave = true;
+
     obstacles = [];
     spawnTimer = 0;
-    spawnInterval = 0.85;
+    spawnInterval = 1.2;
     difficultyTimer = 0;
     distance = 0;
-    pointerDirection = 0;
+    wave.offset = 0;
+    jumpRequested = false;
   }
 
   function loadBestScore() {
@@ -145,64 +176,85 @@
   }
 
   function update(dt) {
-    if (gameState !== "playing") {
-      return;
-    }
+    if (gameState !== "playing") return;
 
     // Difficulty scaling
     difficultyTimer += dt;
-    const difficultyFactor = 1 + difficultyTimer * 0.08; // ramps up gradually
+    const difficultyFactor = 1 + difficultyTimer * 0.08;
 
-    const scrollSpeed = 170 * difficultyFactor; // world moves up
+    const horizSpeed = wave.speed * difficultyFactor;
+    wave.offset += horizSpeed * dt; // moves waves left
 
-    // Update distance (score)
-    distance += scrollSpeed * dt * 0.1;
-    const scoreInt = Math.floor(distance);
-    scoreValueEl.textContent = String(scoreInt);
+    // Score = distance traveled horizontally
+    distance += horizSpeed * dt * 0.1;
+    scoreValueEl.textContent = String(Math.floor(distance));
 
-    // Surfer movement (keyboard + pointer)
-    let intendedDirection = 0;
+    // Surfer physics
+    if (surfer.onWave) {
+      // Attach surfer to wave unless they're just jumping
+      const targetY = waveY(surfer.x) - surfer.height;
+      surfer.y = targetY;
+      surfer.vy = 0;
 
-    if (keys.left) intendedDirection -= 1;
-    if (keys.right) intendedDirection += 1;
-    if (!keys.left && !keys.right) {
-      intendedDirection = pointerDirection;
+      if (jumpRequested) {
+        surfer.onWave = false;
+        surfer.vy = physics.jumpVelocity;
+        jumpRequested = false;
+      }
+    } else {
+      // In the air
+      surfer.vy += physics.gravity * dt;
+      if (surfer.vy > physics.maxFallSpeed) surfer.vy = physics.maxFallSpeed;
+      surfer.y += surfer.vy * dt;
+
+      // Land if we hit the wave from above
+      const waveSurface = waveY(surfer.x) - surfer.height;
+      if (surfer.y >= waveSurface) {
+        surfer.y = waveSurface;
+        surfer.vy = 0;
+        surfer.onWave = true;
+      }
     }
 
-    surfer.vx = intendedDirection * SURFER_SPEED;
-    surfer.x += surfer.vx * dt;
-
-    // Constrain surfer horizontally
-    const margin = 30;
-    if (surfer.x < margin) surfer.x = margin;
-    if (surfer.x > width - margin) surfer.x = width - margin;
-
-    // Obstacle spawning
+    // Obstacle spawning (attached to wave)
     spawnTimer += dt;
-    const minInterval = 0.35;
-    const effectiveInterval = Math.max(minInterval, spawnInterval / difficultyFactor);
-
+    const minInterval = 0.5;
+    const effectiveInterval = Math.max(
+      minInterval,
+      spawnInterval / difficultyFactor
+    );
     if (spawnTimer >= effectiveInterval) {
       spawnTimer = 0;
       spawnObstacle();
     }
 
-    // Move obstacles & check collision
+    // Move obstacles and detect collisions
     const toRemove = [];
     for (let i = 0; i < obstacles.length; i++) {
       const o = obstacles[i];
-      o.y -= scrollSpeed * dt;
+      o.x -= horizSpeed * dt;
 
-      // Collision check (circle-circle)
-      const dx = o.x - surfer.x;
-      const dy = o.y - surfer.y;
-      const rSum = o.radius + surfer.radius;
-      if (dx * dx + dy * dy < rSum * rSum) {
+      // Keep obstacle riding the wave
+      const surfaceY = waveY(o.x);
+      o.y = surfaceY - o.radius * 0.2;
+
+      // Collision: circle vs surfer rectangle-ish
+      const nearestX = Math.max(
+        surfer.x - surfer.width / 2,
+        Math.min(o.x, surfer.x + surfer.width / 2)
+      );
+      const nearestY = Math.max(
+        surfer.y - surfer.height,
+        Math.min(o.y, surfer.y)
+      );
+      const dx = o.x - nearestX;
+      const dy = o.y - nearestY;
+      if (dx * dx + dy * dy < o.radius * o.radius) {
         gameOver();
         break;
       }
 
-      if (o.y + o.radius < -40) {
+      if (o.x + o.radius < -50) {
         toRemove.push(i);
       }
     }
@@ -213,130 +265,160 @@
   }
 
   function spawnObstacle() {
-    const laneMargin = 40;
-    const x = laneMargin + Math.random() * (width - laneMargin * 2);
-    const y = height + 40;
-
+    const radiusBase = 22 + Math.random() * 10;
     const types = ["rock", "buoy", "mine"];
     const type = types[Math.floor(Math.random() * types.length)];
 
-    let radius;
-    switch (type) {
-      case "rock":
-        radius = 24 + Math.random() * 10;
-        break;
-      case "buoy":
-        radius = 16 + Math.random() * 6;
-        break;
-      case "mine":
-        radius = 20 + Math.random() * 4;
-        break;
-      default:
-        radius = 20;
-    }
-
     obstacles.push({
-      x,
-      y,
-      radius,
+      x: width + radiusBase + 40,
+      y: waveY(width + radiusBase),
+      radius: radiusBase,
       type
     });
   }
 
+  // Drawing
+
   function drawBackground(time) {
-    // Deep ocean gradient
-    const gradient = ctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, "#001935");
-    gradient.addColorStop(0.5, "#003f7d");
-    gradient.addColorStop(1, "#001427");
-    ctx.fillStyle = gradient;
+    // Sky
+    const gSky = ctx.createLinearGradient(0, 0, 0, height);
+    gSky.addColorStop(0, "#031730");
+    gSky.addColorStop(0.4, "#04264e");
+    gSky.addColorStop(1, "#02101f");
+    ctx.fillStyle = gSky;
     ctx.fillRect(0, 0, width, height);
 
-    // Vertical glowing "blue wave" column
-    const centerX = width * 0.5;
-    const waveWidth = Math.max(width * 0.35, 240);
-    const half = waveWidth / 2;
+    // Distant horizon glow
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    const hg = ctx.createRadialGradient(
+      width * 0.15,
+      height * 0.2,
+      10,
+      width * 0.15,
+      height * 0.2,
+      height * 0.8
+    );
+    hg.addColorStop(0, "#00c8ff");
+    hg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = hg;
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
 
-    const waveGradient = ctx.createLinearGradient(centerX - half, 0, centerX + half, 0);
-    waveGradient.addColorStop(0, "rgba(0, 120, 255, 0.1)");
-    waveGradient.addColorStop(0.5, "rgba(0, 190, 255, 0.5)");
-    waveGradient.addColorStop(1, "rgba(0, 120, 255, 0.1)");
-
-    ctx.fillStyle = waveGradient;
+    // Ocean fill under wave
+    ctx.save();
     ctx.beginPath();
-
-    // Slight horizontal wobble to feel alive
-    const wobble = Math.sin(time * 0.0006) * (width * 0.03);
-
-    ctx.moveTo(centerX - half + wobble, 0);
-    ctx.lineTo(centerX + half + wobble, 0);
-    ctx.lineTo(centerX + half - wobble, height);
-    ctx.lineTo(centerX - half - wobble, height);
+    ctx.moveTo(0, height);
+    const step = 20;
+    for (let x = 0; x <= width; x += step) {
+      const y = waveY(x);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(width, height);
     ctx.closePath();
+
+    const gWater = ctx.createLinearGradient(0, height * 0.4, 0, height);
+    gWater.addColorStop(0, "#024b7a");
+    gWater.addColorStop(1, "#001425");
+    ctx.fillStyle = gWater;
     ctx.fill();
 
-    // Foam lines
-    ctx.save();
-    ctx.globalAlpha = 0.28;
-    ctx.lineWidth = 3;
-
-    const foamCount = 6;
-    for (let i = 0; i < foamCount; i++) {
-      const offset = (i / foamCount) * height;
-      ctx.beginPath();
-      for (let y = 0; y <= height; y += 26) {
-        const t = (y + offset + time * 0.08) * 0.02 + i;
-        const amp = waveWidth * 0.18;
-        const x = centerX + Math.sin(t) * amp * 0.5;
-        if (y === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.strokeStyle = "rgba(239, 255, 255, 0.7)";
-      ctx.stroke();
+    // Highlight wave crest
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(200, 245, 255, 0.85)";
+    ctx.beginPath();
+    for (let x = 0; x <= width; x += step) {
+      const y = waveY(x);
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
+    ctx.stroke();
     ctx.restore();
   }
 
   function drawSurfer() {
-    const { x, y, radius } = surfer;
+    const { x, y, width: w, height: h } = surfer;
 
-    // Board
     ctx.save();
     ctx.translate(x, y);
-    ctx.rotate(-0.15); // small tilt
+    ctx.translate(0, -h / 2);
+
+    // Board (slight tilt)
+    ctx.save();
+    ctx.rotate(-0.1);
     ctx.beginPath();
-    const boardLen = radius * 2.1;
-    const boardWidth = radius * 0.9;
-    ctx.moveTo(-boardLen / 2, 0);
-    ctx.quadraticCurveTo(-boardLen / 4, -boardWidth, 0, -boardWidth);
-    ctx.quadraticCurveTo(boardLen / 4, -boardWidth, boardLen / 2, 0);
-    ctx.quadraticCurveTo(boardLen / 4, boardWidth, 0, boardWidth);
-    ctx.quadraticCurveTo(-boardLen / 4, boardWidth, -boardLen / 2, 0);
+    const bl = w * 1.4;
+    const bw = h * 0.4;
+    ctx.moveTo(-bl / 2, 0);
+    ctx.quadraticCurveTo(-bl / 3, -bw, 0, -bw * 1.1);
+    ctx.quadraticCurveTo(bl / 3, -bw, bl / 2, 0);
+    ctx.quadraticCurveTo(bl / 3, bw, 0, bw);
+    ctx.quadraticCurveTo(-bl / 3, bw, -bl / 2, 0);
     ctx.closePath();
-    const boardGradient = ctx.createLinearGradient(-boardLen / 2, 0, boardLen / 2, 0);
-    boardGradient.addColorStop(0, "#00f2ff");
-    boardGradient.addColorStop(1, "#0076ff");
-    ctx.fillStyle = boardGradient;
+    const boardGrad = ctx.createLinearGradient(-bl / 2, 0, bl / 2, 0);
+    boardGrad.addColorStop(0, "#ff4c6a");
+    boardGrad.addColorStop(1, "#ffb347");
+    ctx.fillStyle = boardGrad;
+    ctx.fill();
+    ctx.restore();
+
+    // Legs
+    ctx.strokeStyle = "#ffd08a";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.12, h * 0.2);
+    ctx.lineTo(-w * 0.12, h * 0.45);
+    ctx.moveTo(w * 0.12, h * 0.15);
+    ctx.lineTo(w * 0.12, h * 0.43);
+    ctx.stroke();
+
+    // Torso
+    ctx.fillStyle = "#ffd8a0";
+    ctx.beginPath();
+    ctx.roundRect(-w * 0.15, -h * 0.15, w * 0.3, h * 0.35, 8);
     ctx.fill();
 
-    // Rider
+    // Arms
     ctx.beginPath();
-    ctx.arc(0, -radius * 0.9, radius * 0.6, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffe6c7";
+    ctx.moveTo(-w * 0.15, -h * 0.05);
+    ctx.lineTo(-w * 0.3, h * 0.1);
+    ctx.moveTo(w * 0.15, -h * 0.05);
+    ctx.lineTo(w * 0.32, h * 0.05);
+    ctx.stroke();
+
+    // Shorts
+    ctx.fillStyle = "#12c9a0";
+    ctx.beginPath();
+    ctx.roundRect(-w * 0.16, h * 0.05, w * 0.32, h * 0.22, 6);
     ctx.fill();
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(0, -h * 0.28, h * 0.18, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffd8a0";
+    ctx.fill();
+
+    // Simple hair band
+    ctx.beginPath();
+    ctx.arc(0, -h * 0.3, h * 0.18, Math.PI * 0.1, Math.PI * 0.9);
+    ctx.strokeStyle = "#f4b24f";
+    ctx.lineWidth = 3;
+    ctx.stroke();
 
     ctx.restore();
 
-    // Little wake trail
+    // Small spray trail behind board
     ctx.save();
-    ctx.globalAlpha = 0.55;
+    ctx.globalAlpha = 0.5;
     ctx.beginPath();
-    ctx.moveTo(x - radius * 0.8, y + radius * 0.2);
+    const sprayY = surfer.y + 6;
+    ctx.moveTo(surfer.x - w * 0.9, sprayY);
     ctx.quadraticCurveTo(
-      x - radius * 1.8,
-      y + radius * 1.4,
-      x - radius * 0.2,
-      y + radius * 2.2
+      surfer.x - w * 1.4,
+      sprayY - h * 0.2,
+      surfer.x - w * 1.8,
+      sprayY + h * 0.1
     );
     ctx.strokeStyle = "rgba(230, 250, 255, 0.9)";
     ctx.lineWidth = 2;
@@ -369,15 +451,15 @@
 
   function drawRock(r) {
     ctx.beginPath();
-    ctx.moveTo(-r * 0.9, r * 0.2);
-    ctx.lineTo(-r * 0.6, -r * 0.5);
+    ctx.moveTo(-r * 0.9, r * 0.3);
+    ctx.lineTo(-r * 0.6, -r * 0.4);
     ctx.lineTo(0, -r * 0.9);
-    ctx.lineTo(r * 0.6, -r * 0.4);
+    ctx.lineTo(r * 0.6, -r * 0.3);
     ctx.lineTo(r * 0.9, r * 0.2);
-    ctx.quadraticCurveTo(0, r * 0.6, -r * 0.9, r * 0.2);
+    ctx.quadraticCurveTo(0, r * 0.7, -r * 0.9, r * 0.3);
     ctx.closePath();
     const g = ctx.createLinearGradient(-r, -r, r, r);
-    g.addColorStop(0, "#173042");
+    g.addColorStop(0, "#1b3344");
     g.addColorStop(1, "#0b1722");
     ctx.fillStyle = g;
     ctx.fill();
@@ -386,7 +468,7 @@
   function drawBuoy(r) {
     // Base float
     ctx.beginPath();
-    ctx.arc(0, 0, r, Math.PI * 0.1, Math.PI * 0.9);
+    ctx.arc(0, 0, r, Math.PI * 0.2, Math.PI * 0.8);
     ctx.lineWidth = 3;
     ctx.strokeStyle = "#ffffff";
     ctx.stroke();
@@ -396,14 +478,14 @@
     // Mast
     ctx.beginPath();
     ctx.moveTo(0, -r * 0.1);
-    ctx.lineTo(0, -r * 1.5);
+    ctx.lineTo(0, -r * 1.6);
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
     ctx.stroke();
 
     // Top light
     ctx.beginPath();
-    ctx.arc(0, -r * 1.7, r * 0.25, 0, Math.PI * 2);
+    ctx.arc(0, -r * 1.8, r * 0.28, 0, Math.PI * 2);
     ctx.fillStyle = "#ffd74d";
     ctx.fill();
   }
@@ -417,7 +499,6 @@
     ctx.strokeStyle = "#5472b8";
     ctx.stroke();
 
-    // Spikes
     const spikes = 7;
     for (let i = 0; i < spikes; i++) {
       const angle = (i / spikes) * Math.PI * 2;
@@ -450,35 +531,34 @@
     requestAnimationFrame(loop);
   }
 
-  // Input handling
+  // Input handling: just jump (space / click / touch)
 
-  const keys = {
-    left: false,
-    right: false
-  };
+  let jumpHeld = false;
+
+  function requestJump() {
+    if (!jumpHeld) {
+      jumpRequested = true;
+      jumpHeld = true;
+    }
+  }
+
+  function releaseJump() {
+    jumpHeld = false;
+  }
 
   function handleKeyDown(e) {
-    if (e.code === "ArrowLeft" || e.code === "KeyA") {
-      keys.left = true;
-      e.preventDefault();
-    } else if (e.code === "ArrowRight" || e.code === "KeyD") {
-      keys.right = true;
-      e.preventDefault();
-    } else if (e.code === "Space") {
-      // Space to start or restart
+    if (e.code === "Space") {
       if (gameState !== "playing") {
         startGame();
-        e.preventDefault();
       }
+      requestJump();
+      e.preventDefault();
     }
   }
 
   function handleKeyUp(e) {
-    if (e.code === "ArrowLeft" || e.code === "KeyA") {
-      keys.left = false;
-      e.preventDefault();
-    } else if (e.code === "ArrowRight" || e.code === "KeyD") {
-      keys.right = false;
+    if (e.code === "Space") {
+      releaseJump();
       e.preventDefault();
     }
   }
@@ -486,18 +566,15 @@
   document.addEventListener("keydown", handleKeyDown);
   document.addEventListener("keyup", handleKeyUp);
 
-  // Pointer / touch for mobile
-
   function pointerDown(ev) {
     if (gameState !== "playing") {
       startGame();
     }
-    const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
-    pointerDirection = clientX < width / 2 ? -1 : 1;
+    requestJump();
   }
 
   function pointerUp() {
-    pointerDirection = 0;
+    releaseJump();
   }
 
   canvas.addEventListener("mousedown", pointerDown);
@@ -529,13 +606,13 @@
     gameOverPanel.classList.add("hidden");
   });
 
-  // Initial menu text tweaks (optional flavor)
+  // Initial menu text
   overlayTitle.textContent = "Tidal Drop";
   overlaySubtitle.innerHTML =
-    'Ride a vertical blue wave through floating hazards.<br />' +
-    'Use <strong>← →</strong> or <strong>A / D</strong> to steer. ' +
-    'Tap left / right on mobile.';
+    "Press <strong>Space</strong> or <strong>Tap</strong> to jump off the wave.<br />" +
+    "Time your jumps with the blue waves to gain speed and avoid hazards.";
 
-  // Kick off loop
+  // Start the render loop
+  resetGameValues();
   requestAnimationFrame(loop);
 })();
